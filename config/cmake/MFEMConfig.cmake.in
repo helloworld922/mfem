@@ -85,6 +85,10 @@ check_required_components(MFEM)
 
 include(CMakeFindDependencyMacro)
 
+if (MFEM_USE_CUDA)
+  find_dependency(CUDAToolkit)
+endif (MFEM_USE_CUDA)
+
 if (MFEM_USE_HIP)
   # hip/rocm uses the modern MFEM way of linking to targets, need to find dependencies
   find_dependency(HIP)
