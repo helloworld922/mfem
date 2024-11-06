@@ -50,6 +50,7 @@ set(MFEM_USE_SIDRE @MFEM_USE_SIDRE@)
 set(MFEM_USE_FMS @MFEM_USE_FMS@)
 set(MFEM_USE_CONDUIT @MFEM_USE_CONDUIT@)
 set(MFEM_USE_PUMI @MFEM_USE_PUMI@)
+set(MFEM_USE_HIP @MFEM_USE_HIP@)
 set(MFEM_USE_CUDA @MFEM_USE_CUDA@)
 set(MFEM_USE_OCCA @MFEM_USE_OCCA@)
 set(MFEM_USE_RAJA @MFEM_USE_RAJA@)
@@ -86,6 +87,7 @@ check_required_components(MFEM)
 include(CMakeFindDependencyMacro)
 
 if (MFEM_USE_CUDA)
+  # required for projects linking to MFEM+CUDA, even if they don't use CUDA directly
   find_dependency(CUDAToolkit)
 endif (MFEM_USE_CUDA)
 
