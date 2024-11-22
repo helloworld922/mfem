@@ -97,21 +97,20 @@ void QuadratureSpaceBase::Integrate(VectorCoefficient &coeff,
 void QuadratureSpace::ConstructOffsets()
 {
    const int num_elem = mesh.GetNE();
-   offsets.SetSize(num_elem + 1);
+   ne = num_elem;
 
    if (mesh.GetNumGeometries(mesh.Dimension()) == 1)
    {
       Array<Geometry::Type> geoms;
       mesh.GetGeometries(mesh.Dimension(), geoms);
-      const int ir_size = int_rule[geoms[0]]->GetNPoints();
-      auto d_offsets = offsets.Write();
-      mfem::forall(num_elem + 1, [=] MFEM_HOST_DEVICE (int i)
-      {
-         d_offsets[i] = i*ir_size;
-      });
+      offsets.SetSize(1);
+      offsets.HostWrite();
+      offsets[0] = int_rule[geoms[0]]->GetNPoints();
+      size = num_elem * offsets[0];
    }
    else
    {
+      offsets.SetSize(num_elem + 1);
       int offset = 0;
       for (int i = 0; i < num_elem; i++)
       {
@@ -121,8 +120,8 @@ void QuadratureSpace::ConstructOffsets()
          offset += int_rule[geom]->GetNPoints();
       }
       offsets[num_elem] = offset;
+      size = offsets.Last();
    }
-   size = offsets.Last();
 }
 
 void QuadratureSpace::Construct()
