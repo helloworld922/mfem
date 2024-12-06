@@ -17,6 +17,7 @@ namespace mfem
 MassIntegrator::Kernels::Kernels()
 {
    // 2D
+   MassIntegrator::AddSpecialization<2,1,1>();
    MassIntegrator::AddSpecialization<2,2,2>();
    MassIntegrator::AddSpecialization<2,3,3>();
    MassIntegrator::AddSpecialization<2,4,4>();
@@ -26,6 +27,8 @@ MassIntegrator::Kernels::Kernels()
    MassIntegrator::AddSpecialization<2,8,8>();
    MassIntegrator::AddSpecialization<2,9,9>();
    // 3D
+   MassIntegrator::AddSpecialization<3,1,1>();
+   MassIntegrator::AddSpecialization<3,1,2>();
    MassIntegrator::AddSpecialization<3,2,2>();
    MassIntegrator::AddSpecialization<3,2,3>();
    MassIntegrator::AddSpecialization<3,3,4>();
