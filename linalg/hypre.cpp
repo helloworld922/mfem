@@ -28,29 +28,23 @@ namespace mfem
 {
 
 bool Hypre::configure_runtime_policy_from_mfem = true;
+Hypre::State Hypre::state = Hypre::State::UNINITIALIZED;
 
 void Hypre::Init()
 {
-   Hypre &hypre = Instance();
-   if (hypre.state == State::NONE)
+   if (state != State::INITIALIZED)
    {
-      // initialize Hypre
-#if MFEM_HYPRE_VERSION >= 22900
-      if (!HYPRE_Initialized())
-      {
-         HYPRE_Init();
-      }
-#elif MFEM_HYPRE_VERSION >= 21900
-      // potential problematic edge case if user manually called HYPRE_Init with
-      // HYPRE 2.19.0 to 2.28.0. Unfortunately there's no way to check in these
-      // versions if this is the case.
+#if MFEM_HYPRE_VERSION >= 21900
       HYPRE_Init();
 #endif
-
-      // Global hypre options that we set by default
-      hypre.SetDefaultOptions();
-      hypre.state = State::INITIALIZED;
+      SetDefaultOptions();
+      // Apply the setting of 'configure_runtime_policy_from_mfem' according to
+      // the current configuration of the mfem::Device (HYPRE >= 2.31.0):
+      InitDevice();
+      // Create the singleton Hypre object AFTER initializing HYPRE:
+      Instance();
    }
+   state = State::INITIALIZED;
 }
 
 void Hypre::InitDevice()
@@ -61,6 +55,8 @@ void Hypre::InitDevice()
 #if defined(HYPRE_USING_GPU) && (MFEM_HYPRE_VERSION >= 23100)
    if (configure_runtime_policy_from_mfem)
    {
+      MFEM_VERIFY(HYPRE_Initialized(), "HYPRE must be initialized before"
+                  " calling Hypre::InitDevice()");
       if (Device::Allows(Backend::DEVICE_MASK & ~Backend::DEBUG_DEVICE))
       {
          HYPRE_SetMemoryLocation(HYPRE_MEMORY_DEVICE);
@@ -78,14 +74,13 @@ void Hypre::InitDevice()
 
 void Hypre::Finalize()
 {
-   Hypre &hypre = Instance();
-   if (hypre.state == State::INITIALIZED)
+   if (state != State::UNINITIALIZED)
    {
 #if MFEM_HYPRE_VERSION >= 21900
       HYPRE_Finalize();
 #endif
-      hypre.state = State::FINALIZED;
    }
+   state = State::UNINITIALIZED;
 }
 
 void Hypre::SetDefaultOptions()
