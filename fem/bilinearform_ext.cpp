@@ -858,7 +858,7 @@ void EABilinearFormExtension::Assemble()
    SetupRestrictionOperators(L2FaceValues::SingleValued);
 
    ne = trial_fes->GetMesh()->GetNE();
-   elemDofs = trial_fes->GetFE(0)->GetDof();
+   elemDofs = trial_fes->GetTypicalFE()->GetDof();
 
    ea_data.SetSize(ne*elemDofs*elemDofs, Device::GetMemoryType());
    ea_data.UseDevice(true);
@@ -874,9 +874,7 @@ void EABilinearFormExtension::Assemble()
       integrators[i]->AssembleEA(*a->FESpace(), ea_data, i);
    }
 
-   faceDofs = trial_fes ->
-              GetTraceElement(0, trial_fes->GetMesh()->GetFaceGeometry(0)) ->
-              GetDof();
+   faceDofs = trial_fes->GetTypicalTraceElement()->GetDof();
 
    MFEM_VERIFY(a->GetBBFI()->Size() == 0,
                "Element assembly does not support AddBoundaryIntegrator yet.");
