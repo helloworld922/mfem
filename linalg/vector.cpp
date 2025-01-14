@@ -28,6 +28,209 @@
 namespace mfem
 {
 
+#if defined(MFEM_USE_CUDA) or defined(MFEM_USE_HIP)
+/**
+ * Reducer for helping to compute L2-norms. Given two partial results:
+ * a0 = sum_i (|v_i|/a1)^2
+ * b0 = sum_j (|v_j|/b1)^2 (j disjoint from i for vector v)
+ * computes:
+ * a1 = max(a1, b1)
+ * a0 = (a1 == 0 ? 0 : sum_{k in union(i,j)} (|v_k|/a1)^2)
+ *
+ * This form is resiliant against overflow/underflow, similar to std::hypot
+ */
+struct L2Reducer
+{
+   using value_type = DevicePair<real_t, real_t>;
+   MFEM_HOST_DEVICE void join(value_type& a, const value_type &b) const
+   {
+      real_t scale = fmax(a.second, b.second);
+      if (scale > 0)
+      {
+         real_t s = a.second / scale;
+         a.first *= s * s;
+         s = b.second / scale;
+         a.first += b.first * s * s;
+         a.second = scale;
+      }
+   }
+
+   MFEM_HOST_DEVICE void init_val(value_type &a) const
+   {
+      a.first = 0;
+      a.second = 0;
+   }
+};
+
+/**
+ * Reducer for helping to compute Lp-norms. Given two partial results:
+ * a0 = sum_i (|v_i|/a1)^p
+ * b0 = sum_j (|v_j|/b1)^p (j disjoint from i for vector v)
+ * computes:
+ * a1 = max(a1, b1)
+ * a0 = (a1 == 0 ? 0 : sum_{k in union(i,j)} (|v_k|/a1)^p)
+ *
+ * This form is resiliant against overflow/underflow, similar to std::hypot
+ */
+struct LpReducer
+{
+   real_t p;
+   using value_type = DevicePair<real_t, real_t>;
+   MFEM_HOST_DEVICE void join(value_type& a, const value_type &b) const
+   {
+      real_t scale = fmax(a.second, b.second);
+      if (scale > 0)
+      {
+         a.first = a.first * pow(a.second / scale, p) +
+                   b.first * pow(b.second / scale, p);
+         a.second = scale;
+      }
+   }
+
+   MFEM_HOST_DEVICE void init_val(value_type &a) const
+   {
+      a.first = 0;
+      a.second = 0;
+   }
+};
+
+static Array<real_t>& vector_workspace()
+{
+   static Array<real_t> instance;
+   return instance;
+}
+
+static Array<DevicePair<real_t, real_t>> &Lpvector_workspace()
+{
+   static Array<DevicePair<real_t, real_t>> instance;
+   return instance;
+}
+
+static real_t devVectorMin(int size, const real_t *m_data)
+{
+   real_t res = infinity();
+   reduce(
+      size, res,
+   [=] MFEM_HOST_DEVICE(int i, real_t &r) { r = fmin(r, m_data[i]); },
+   MinReducer<real_t> {}, true, vector_workspace());
+   return res;
+}
+
+static real_t devVectorMax(int size, const real_t *m_data)
+{
+   real_t res = -infinity();
+   reduce(
+      size, res,
+   [=] MFEM_HOST_DEVICE(int i, real_t &r) { r = fmax(r, m_data[i]); },
+   MaxReducer<real_t> {}, true, vector_workspace());
+   return res;
+}
+
+static real_t devVectorLinf(int size, const real_t *m_data)
+{
+   real_t res = 0;
+   reduce(
+      size, res,
+   [=] MFEM_HOST_DEVICE(int i, real_t &r) { r = fmax(r, fabs(m_data[i])); },
+   MaxReducer<real_t> {}, true, vector_workspace());
+   return res;
+}
+
+static real_t devVectorL1(int size, const real_t *m_data)
+{
+   real_t res = 0;
+   reduce(
+      size, res,
+   [=] MFEM_HOST_DEVICE(int i, real_t &r) { r += fabs(m_data[i]); },
+   SumReducer<real_t> {}, true, vector_workspace());
+   return res;
+}
+
+static real_t devVectorL2(int size, const real_t *m_data)
+{
+   using value_type = DevicePair<real_t, real_t>;
+   value_type res;
+   res.first = 0;
+   res.second = 0;
+   // first compute sum (|m_data|/scale)^2
+   reduce(
+      size, res,
+      [=] MFEM_HOST_DEVICE(int i, value_type &r)
+   {
+      real_t n = fabs(m_data[i]);
+      if (n > 0)
+      {
+         if (r.second <= n)
+         {
+            real_t arg = r.second / n;
+            r.first = r.first * (arg * arg) + 1;
+            r.second = n;
+         }
+         else
+         {
+            real_t arg = n / r.second;
+            r.first += arg * arg;
+         }
+      }
+   },
+   L2Reducer{}, true, Lpvector_workspace());
+   // final answer
+   return res.second * sqrt(res.first);
+}
+
+static real_t devVectorLp(int size, real_t p, const real_t *m_data)
+{
+   using value_type = DevicePair<real_t, real_t>;
+   value_type res;
+   res.first = 0;
+   res.second = 0;
+   // first compute sum (|m_data|/scale)^p
+   reduce(
+      size, res,
+      [=] MFEM_HOST_DEVICE(int i, value_type &r)
+   {
+      real_t n = fabs(m_data[i]);
+      if (n > 0)
+      {
+         if (r.second <= n)
+         {
+            real_t arg = r.second / n;
+            r.first = r.first * pow(arg, p) + 1;
+            r.second = n;
+         }
+         else
+         {
+            real_t arg = n / r.second;
+            r.first += pow(arg, p);
+         }
+      }
+   },
+   LpReducer{p}, true, Lpvector_workspace());
+   // final answer
+   return res.second * pow(res.first, 1.0 / p);
+}
+
+static real_t devVectorSum(int size, const real_t *m_data)
+{
+   real_t res = 0;
+   reduce(
+   size, res, [=] MFEM_HOST_DEVICE(int i, real_t &r) { r += m_data[i]; },
+   SumReducer<real_t> {}, true, vector_workspace());
+   return res;
+}
+
+static real_t devVectorDot(int size, const real_t *m_data,
+                           const real_t *v_data)
+{
+   real_t res = 0;
+   reduce(
+      size, res,
+   [=] MFEM_HOST_DEVICE(int i, real_t &r) { r += m_data[i] * v_data[i]; },
+   SumReducer<real_t> {}, true, vector_workspace());
+   return res;
+}
+#endif
+
 Vector::Vector(const Vector &v)
 {
    const int s = v.Size();
@@ -855,37 +1058,124 @@ real_t Vector::Norml2() const
    // Scale entries of Vector on the fly, using algorithms from
    // std::hypot() and LAPACK's drm2. This scaling ensures that the
    // argument of each call to std::pow is <= 1 to avoid overflow.
-   if (0 == size)
+   if (size == 0)
    {
       return 0.0;
-   } // end if 0 == size
+   }
 
-   data.Read(MemoryClass::HOST, size);
+   if (UseDevice())
+   {
+#ifdef MFEM_USE_CUDA
+      if (Device::Allows(Backend::CUDA_MASK))
+      {
+         return devVectorL2(size, Read());
+      }
+#endif
+#ifdef MFEM_USE_HIP
+      if (Device::Allows(Backend::HIP_MASK))
+      {
+         return devVectorL2(size, Read());
+      }
+#endif
+   }
+
+   auto ptr = data.Read(MemoryClass::HOST, size);
    if (1 == size)
    {
-      return std::abs(data[0]);
+      return std::abs(ptr[0]);
    } // end if 1 == size
-   return kernels::Norml2(size, (const real_t*) data);
+   return kernels::Norml2(size, ptr);
 }
 
 real_t Vector::Normlinf() const
 {
-   HostRead();
-   real_t max = 0.0;
-   for (int i = 0; i < size; i++)
+   if (size == 0) { return 0; }
+
+   const bool use_dev = UseDevice();
+   auto m_data = Read(use_dev);
+
+   if (!use_dev) { goto vector_linf_cpu; }
+
+#ifdef MFEM_USE_CUDA
+   if (Device::Allows(Backend::CUDA_MASK))
    {
-      max = std::max(std::abs(data[i]), max);
+      return devVectorLinf(size, m_data);
    }
-   return max;
+#endif
+
+#ifdef MFEM_USE_HIP
+   if (Device::Allows(Backend::HIP_MASK))
+   {
+      return devVectorLinf(size, m_data);
+   }
+#endif
+
+   if (Device::Allows(Backend::DEBUG_DEVICE))
+   {
+      const int N = size;
+      auto m_data_ = Read();
+      Vector max(1);
+      max = 0.;
+      max.UseDevice(true);
+      auto d_max = max.ReadWrite();
+      mfem::forall(N, [=] MFEM_HOST_DEVICE(int i)
+      {
+         d_max[0] = fmax(d_max[0], fabs(m_data_[i]));
+      });
+      max.HostReadWrite();
+      return max[0];
+   }
+
+vector_linf_cpu:
+   real_t maximum = fabs(data[0]);
+   for (int i = 1; i < size; i++)
+   {
+      maximum = fmax(maximum, fabs(m_data[i]));
+   }
+   return maximum;
 }
 
 real_t Vector::Norml1() const
 {
-   HostRead();
+   if (size == 0) { return 0.0; }
+
+   if (UseDevice())
+   {
+#ifdef MFEM_USE_CUDA
+      if (Device::Allows(Backend::CUDA_MASK))
+      {
+         return devVectorL1(size, Read());
+      }
+#endif
+#ifdef MFEM_USE_HIP
+      if (Device::Allows(Backend::HIP_MASK))
+      {
+         return devVectorL1(size, Read());
+      }
+#endif
+      if (Device::Allows(Backend::DEBUG_DEVICE))
+      {
+         const int N = size;
+         auto d_data = Read();
+         Vector sum(1);
+         sum.UseDevice(true);
+         auto d_sum = sum.Write();
+         d_sum[0] = 0.0;
+         mfem::forall(N, [=] MFEM_HOST_DEVICE (int i)
+         {
+            d_sum[0] += fabs(d_data[i]);
+         });
+         sum.HostReadWrite();
+         return sum[0];
+      }
+   }
+
+   // CPU fallback
+   const real_t *h_data = HostRead();
    real_t sum = 0.0;
    for (int i = 0; i < size; i++)
    {
-      sum += std::abs(data[i]);
+      sum += fabs(h_data[i]);
    }
    return sum;
 }
@@ -907,14 +1197,31 @@ real_t Vector::Normlp(real_t p) const
       // Scale entries of Vector on the fly, using algorithms from
       // std::hypot() and LAPACK's drm2. This scaling ensures that the
       // argument of each call to std::pow is <= 1 to avoid overflow.
-      if (0 == size)
+      if (size == 0)
       {
          return 0.0;
-      } // end if 0 == size
+      }
 
+      if (UseDevice())
+      {
+#ifdef MFEM_USE_CUDA
+         if (Device::Allows(Backend::CUDA_MASK))
+         {
+            return devVectorLp(size, p, Read());
+         }
+#endif
+#ifdef MFEM_USE_HIP
+         if (Device::Allows(Backend::HIP_MASK))
+         {
+            return devVectorLp(size, p, Read());
+         }
+#endif
+      }
+
+      auto ptr = data.Read(MemoryClass::HOST, size);
       if (1 == size)
       {
-         return std::abs(data[0]);
+         return std::abs(ptr[0]);
       } // end if 1 == size
 
       real_t scale = 0.0;
@@ -922,9 +1229,9 @@ real_t Vector::Normlp(real_t p) const
 
       for (int i = 0; i < size; i++)
       {
-         if (data[i] != 0.0)
+         if (ptr[i] != 0.0)
          {
-            const real_t absdata = std::abs(data[i]);
+            const real_t absdata = std::abs(ptr[i]);
             if (scale <= absdata)
             {
                sum = 1.0 + sum * std::pow(scale / absdata, p);
@@ -932,61 +1239,13 @@ real_t Vector::Normlp(real_t p) const
                continue;
             } // end if scale <= absdata
             sum += std::pow(absdata / scale, p); // else scale > absdata
-         } // end if data[i] != 0
+         } // end if ptr[i] != 0
       }
       return scale * std::pow(sum, 1.0/p);
    } // end if p < infinity()
 
    return Normlinf(); // else p >= infinity()
 }
-
-#if defined(MFEM_USE_CUDA) or defined(MFEM_USE_HIP)
-static Array<real_t>& vector_workspace()
-{
-   static Array<real_t> instance;
-   return instance;
-}
-
-static real_t devVectorMin(int size, const real_t *m_data)
-{
-   real_t res = 0;
-   reduce(
-      size, res,
-   [=] MFEM_HOST_DEVICE(int i, real_t &r) { r = fmin(r, m_data[i]); },
-   MinReducer<real_t> {}, true, vector_workspace());
-   return res;
-}
-
-static real_t devVectorMax(int size, const real_t *m_data)
-{
-   real_t res = 0;
-   reduce(
-      size, res,
-   [=] MFEM_HOST_DEVICE(int i, real_t &r) { r = fmax(r, m_data[i]); },
-   MaxReducer<real_t> {}, true, vector_workspace());
-   return res;
-}
-
-static real_t devVectorSum(int size, const real_t *m_data)
-{
-   real_t res = 0;
-   reduce(
-   size, res, [=] MFEM_HOST_DEVICE(int i, real_t &r) { r += m_data[i]; },
-   SumReducer<real_t> {}, true, vector_workspace());
-   return res;
-}
-
-static real_t devVectorDot(int size, const real_t *m_data,
-                           const real_t *v_data)
-{
-   real_t res = 0;
-   reduce(
-      size, res,
-   [=] MFEM_HOST_DEVICE(int i, real_t &r) { r += m_data[i] * v_data[i]; },
-   SumReducer<real_t> {}, true, vector_workspace());
-   return res;
-}
-#endif
 
 real_t Vector::operator*(const Vector &v) const
 {
@@ -1135,7 +1394,7 @@ real_t Vector::Min() const
       auto d_min = min.ReadWrite();
       mfem::forall(N, [=] MFEM_HOST_DEVICE (int i)
       {
-         d_min[0] = (d_min[0]<m_data_[i])?d_min[0]:m_data_[i];
+         d_min[0] = fmin(d_min[0], m_data_[i]);
       });
       min.HostReadWrite();
       return min[0];
@@ -1145,10 +1404,7 @@ vector_min_cpu:
    real_t minimum = data[0];
    for (int i = 1; i < size; i++)
    {
-      if (m_data[i] < minimum)
-      {
-         minimum = m_data[i];
-      }
+      minimum = fmin(minimum, m_data[i]);
    }
    return minimum;
 }
@@ -1198,8 +1454,18 @@ real_t Vector::Max() const
 
    if (Device::Allows(Backend::DEBUG_DEVICE))
    {
+      const int N = size;
       auto m_data_ = Read();
-      return devVectorMax(size, m_data);
+      Vector max(1);
+      max = -infinity();
+      max.UseDevice(true);
+      auto d_max = max.ReadWrite();
+      mfem::forall(N, [=] MFEM_HOST_DEVICE(int i)
+      {
+         d_max[0] = fmax(d_max[0], m_data_[i]);
+      });
+      max.HostReadWrite();
+      return max[0];
    }
 
 vector_max_cpu:
